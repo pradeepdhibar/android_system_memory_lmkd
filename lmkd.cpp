@@ -231,6 +231,42 @@ static struct psi_threshold psi_thresholds[VMPRESS_LEVEL_COUNT] = {
     { PSI_FULL, 70 },    /* 70ms out of 1sec for complete stall */
 };
 
+static bool s_camera_is_top = false;
+static float s_cache_percent = 0.0f;
+static int s_opt_low_adj = 201;
+static int s_opt_mid_adj = 401;
+static int s_opt_high_adj = 801;
+
+#define MAX_KILL_RECORD_COUNT 64
+static int s_killed_pids[MAX_KILL_RECORD_COUNT];
+static unsigned int s_killed_pid_idx = 0;
+
+static void insert_proc_kill_record(int pid) {
+    if (pid <= 0) return;
+    s_killed_pids[s_killed_pid_idx] = pid;
+    s_killed_pid_idx = (s_killed_pid_idx + 1) % MAX_KILL_RECORD_COUNT;
+}
+
+static int get_proc_kill_record(int pid) {
+    if (pid <= 0) return -1;
+    for (int i = 0; i < MAX_KILL_RECORD_COUNT; i++) {
+        if (s_killed_pids[i] == pid) {
+            s_killed_pids[i] = 0;
+            return 1;
+        }
+    }
+    return -1;
+}
+
+static void record_ax_kill(int pid, int oom_score_adj) {
+    if (oom_score_adj == s_opt_low_adj ||
+        oom_score_adj == s_opt_mid_adj ||
+        oom_score_adj == s_opt_high_adj) {
+        if (debug_process_killing) ALOGD("record_ax_kill %d %d", pid, oom_score_adj);
+        insert_proc_kill_record(pid);
+    }
+}
+
 static uint64_t mp_event_count;
 
 static android_log_context ctx;
@@ -1630,6 +1666,23 @@ static void ctrl_command_handler(int dsock_idx) {
     case LMK_PROCS_PRIO:
         cmd_procs_prio(packet, nargs, &cred);
         break;
+    case LMK_SET_CAMERA_TOP:
+        if (len != 2 * (int)sizeof(int)) goto wronglen;
+        s_camera_is_top = (ntohl(packet[1]) != 0);
+        if (debug_process_killing) ALOGD("cmd_set_camera_top = %d", s_camera_is_top ? 1 : 0);
+        break;
+    case LMK_CHECK_KILL_OPTI_PROC: {
+        if (len != 2 * (int)sizeof(int)) goto wronglen;
+        int target_pid = ntohl(packet[1]);
+        int is_killed = get_proc_kill_record(target_pid);
+        if (debug_process_killing) ALOGD("cmd_checkKillOptiProc pid=%d, is_killed=%d", target_pid, is_killed);
+        packet[0] = htonl(LMK_CHECK_KILL_OPTI_PROC);
+        packet[1] = htonl(is_killed);
+        if (ctrl_data_write(dsock_idx, (char*)packet, 2 * sizeof(int)) != 2 * sizeof(int)) {
+            ALOGE("Failed to report check_kill_opti_proc results");
+        }
+        break;
+    }
     default:
         ALOGE("Received unknown command code %d", cmd);
         return;
@@ -2527,6 +2580,7 @@ static int kill_one_process(struct proc* procp, int min_oom_score, struct kill_i
     last_kill_tm = *tm;
 
     inc_killcnt(procp->oomadj);
+    record_ax_kill(pid, procp->oomadj);
 
     if (ki) {
         kill_st.kill_reason = ki->kill_reason;
@@ -3116,6 +3170,10 @@ update_watermarks:
         /* Allow killing perceptible apps if the system is stalled */
         if (critical_stall) {
             min_score_adj = 0;
+        }
+        if (s_camera_is_top) {
+            min_score_adj = 250;
+            if (debug_process_killing) ALOGD("min_score_adj= %d (camera top priority bias)", min_score_adj);
         }
         psi_parse_io(&psi_data);
         psi_parse_cpu(&psi_data);
@@ -4221,6 +4279,29 @@ static bool update_props() {
                      GET_LMK_PROPERTY(int32, "lowmem_min_oom_score", DEF_LOWMEM_MIN_SCORE));
 
     reaper.enable_debug(debug_process_killing);
+
+    /* Axion Memory Manager property sync */
+    int medium_psi = property_get_int32("persist.sys.ax_mem.medium_psi",
+                         property_get_int32("persist.sys.nmm.medium_psi", -1));
+    if (medium_psi >= 0) {
+        psi_partial_stall_ms = medium_psi;
+    }
+    int critical_psi = property_get_int32("persist.sys.ax_mem.critical_psi",
+                          property_get_int32("persist.sys.nmm.critical_psi", -1));
+    if (critical_psi >= 0) {
+        psi_complete_stall_ms = critical_psi;
+    }
+    int cache_pct = property_get_int32("persist.sys.ax_mem.cache_percent",
+                        property_get_int32("persist.sys.nmm.cache_percent", -1));
+    if (cache_pct >= 0) {
+        s_cache_percent = (float)(cache_pct * 0.01);
+    }
+    s_opt_low_adj = property_get_int32("persist.sys.ax_mem.low_adj",
+                        property_get_int32("persist.sys.nmm.low_adj", 201));
+    s_opt_mid_adj = property_get_int32("persist.sys.ax_mem.mid_adj",
+                        property_get_int32("persist.sys.nmm.mid_adj", 401));
+    s_opt_high_adj = property_get_int32("persist.sys.ax_mem.high_adj",
+                         property_get_int32("persist.sys.nmm.high_adj", 801));
 
     /* Call the update props hook */
     if (!lmkd_update_props_hook()) {

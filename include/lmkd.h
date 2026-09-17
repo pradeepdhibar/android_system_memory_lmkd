@@ -39,6 +39,8 @@ enum lmk_cmd {
     LMK_START_MONITORING,   /* Start psi monitoring if it was skipped earlier */
     LMK_BOOT_COMPLETED,     /* Notify LMKD boot is completed */
     LMK_PROCS_PRIO,         /* Register processes and set the same oom_adj_score */
+    LMK_CHECK_KILL_OPTI_PROC = 13, /* Check if optimized process was killed by LMKD */
+    LMK_SET_CAMERA_TOP = 14,       /* Set camera foreground top priority bias */
 };
 
 /*
