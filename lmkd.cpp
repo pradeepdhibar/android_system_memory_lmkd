@@ -147,7 +147,7 @@
 /* ro.lmk.swap_compression_ratio_div property defaults */
 #define DEF_SWAP_COMP_RATIO_DIV 1
 /* ro.lmk.lowmem_min_oom_score defaults */
-#define DEF_LOWMEM_MIN_SCORE (PREVIOUS_APP_ADJ + 1)
+#define DEF_LOWMEM_MIN_SCORE 950
 
 #define LMKD_REINIT_PROP "lmkd.reinit"
 
